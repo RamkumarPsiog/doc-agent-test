@@ -1,28 +1,109 @@
-# Test File
-     This is a test for the documentation agent.
-Edited it second time.
-Edited it third time.
-Edited it fourth time.
-Edited it fifth time.
-Edited it sixth time.
-Edited it seventh time.
-Edited it eigth time.
-Edited it nineth time.
-Edited it Tenth time.
-Edited it Elevelth time.
-Edited it Twelth time.
-Edited it Thirteenth time.
-Prdeep, ramkumar and Sai worked on this file.
-Sathiya worked on this file.
-Edited it fourteenth time.
-Edited it fifteenth time.
-Aishwarya worked on this file.
-Vamsi worked on this     file and madde some changes to this and it meant to work and it didn't.
+//# Test File
+import jakarta.persistence.*;
+import java.time.LocalDate;
 
-Today is thursday.
-Hello world
-Check check check.
-groq expired
-created new groq link
-Confluence api key expired too. generated new one.
-Project i sworking now.
+@Entity
+@Table(name = "patients")
+public class Patient {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long patientId;
+
+    @Column(nullable = false)
+    private String firstName;
+
+    @Column(nullable = false)
+    private String lastName;
+
+    private LocalDate dateOfBirth;
+
+    @Column(unique = true, nullable = false)
+    private String email;
+
+    private String phoneNumber;
+
+    private String bloodGroup;
+
+    private String address;
+
+    // Constructors
+    public Patient() {
+    }
+
+    public Patient(String firstName, String lastName, LocalDate dateOfBirth,
+                   String email, String phoneNumber, String bloodGroup, String address) {
+        this.firstName = firstName;
+        this.lastName = lastName;
+        this.dateOfBirth = dateOfBirth;
+        this.email = email;
+        this.phoneNumber = phoneNumber;
+        this.bloodGroup = bloodGroup;
+        this.address = address;
+    }
+
+    // Getters and Setters
+    public Long getPatientId() {
+        return patientId;
+    }
+
+    public void setPatientId(Long patientId) {
+        this.patientId = patientId;
+    }
+
+    public String getFirstName() {
+        return firstName;
+    }
+
+    public void setFirstName(String firstName) {
+        this.firstName = firstName;
+    }
+
+    public String getLastName() {
+        return lastName;
+    }
+
+    public void setLastName(String lastName) {
+        this.lastName = lastName;
+    }
+
+    public LocalDate getDateOfBirth() {
+        return dateOfBirth;
+    }
+
+    public void setDateOfBirth(LocalDate dateOfBirth) {
+        this.dateOfBirth = dateOfBirth;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getPhoneNumber() {
+        return phoneNumber;
+    }
+
+    public void setPhoneNumber(String phoneNumber) {
+        this.phoneNumber = phoneNumber;
+    }
+
+    public String getBloodGroup() {
+        return bloodGroup;
+    }
+
+    public void setBloodGroup(String bloodGroup) {
+        this.bloodGroup = bloodGroup;
+    }
+
+    public String getAddress() {
+        return address;
+    }
+
+    public void setAddress(String address) {
+        this.address = address;
+    }
+}
