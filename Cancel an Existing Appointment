@@ -1,0 +1,140 @@
+// File: src/main/java/com/hospital/management/scheduling/service/AppointmentService.java
+// UPDATE: Add cancellation engine processing
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import com.hospital.management.scheduling.model.Doctor;
+import com.hospital.management.scheduling.repository.AppointmentRepository;
+import com.hospital.management.scheduling.repository.DoctorRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class AppointmentService {
+
+    private final AppointmentRepository appointmentRepository;
+    private final DoctorRepository doctorRepository;
+
+    public AppointmentService(AppointmentRepository appointmentRepository, DoctorRepository doctorRepository) {
+        this.appointmentRepository = appointmentRepository;
+        this.doctorRepository = doctorRepository;
+    }
+
+    @Transactional
+    public Appointment bookAppointment(BookingRequest request) {
+        Doctor doctor = doctorRepository.findById(request.doctorId())
+                .orElseThrow(() -> new IllegalArgumentException("Doctor not found"));
+
+        boolean isSlotTaken = appointmentRepository.existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(
+                request.doctorId(), request.appointmentDate(), request.timeSlot(), AppointmentStatus.CONFIRMED);
+
+        if (isSlotTaken) {
+            throw new IllegalStateException("The requested time slot is already booked.");
+        }
+
+        Appointment appointment = new Appointment(
+                request.patientId(),
+                doctor,
+                request.appointmentDate(),
+                request.timeSlot(),
+                AppointmentStatus.CONFIRMED
+        );
+
+        return appointmentRepository.save(appointment);
+    }
+
+    // New business logic to handle appointment cancellation cleanly
+    @Transactional
+    public Appointment cancelAppointment(Long appointmentId) {
+        Appointment appointment = appointmentRepository.findById(appointmentId)
+                .orElseThrow(() -> new IllegalArgumentException("Appointment record not found"));
+
+        if (appointment.getStatus() == AppointmentStatus.CANCELLED) {
+            throw new IllegalStateException("Appointment is already cancelled.");
+        }
+
+        appointment.setStatus(AppointmentStatus.CANCELLED);
+        return appointmentRepository.save(appointment);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Appointment> getDoctorAgenda(Long doctorId, LocalDate date) {
+        if (!doctorRepository.existsById(doctorId)) {
+            throw new IllegalArgumentException("Doctor not found");
+        }
+        return appointmentRepository.findByDoctorIdAndAppointmentDateOrderByTimeSlotAsc(doctorId, date);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Appointment> getPatientHistory(Long patientId) {
+        return appointmentRepository.findByPatientIdOrderByAppointmentDateDescTimeSlotDesc(patientId);
+    }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/controller/AppointmentController.java
+// UPDATE: Expose the cancellation API patch target
+package com.hospital.management.scheduling.controller;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.service.AppointmentService;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/v1/appointments")
+public class AppointmentController {
+
+    private final AppointmentService appointmentService;
+
+    public AppointmentController(AppointmentService appointmentService) {
+        this.appointmentService = appointmentService;
+    }
+
+    @PostMapping
+    public ResponseEntity<?> bookAppointment(@RequestBody BookingRequest request) {
+        try {
+            Appointment appointment = appointmentService.bookAppointment(request);
+            return ResponseEntity.status(HttpStatus.CREATED).body(appointment);
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(e.getMessage());
+        }
+    }
+
+    // New state transition controller routing for cancellation
+    @PatchMapping("/{id}/cancel")
+    public ResponseEntity<?> cancelAppointment(@PathVariable Long id) {
+        try {
+            Appointment cancelledAppointment = appointmentService.cancelAppointment(id);
+            return ResponseEntity.ok(cancelledAppointment);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(e.getMessage());
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(e.getMessage());
+        }
+    }
+
+    @GetMapping("/doctor/{doctorId}")
+    public ResponseEntity<List<Appointment>> getDoctorAgenda(
+            @PathVariable Long doctorId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return ResponseEntity.ok(appointmentService.getDoctorAgenda(doctorId, date));
+    }
+
+    @GetMapping("/patient/{patientId}")
+    public ResponseEntity<List<Appointment>> getPatientHistory(@PathVariable Long patientId) {
+        return ResponseEntity.ok(appointmentService.getPatientHistory(patientId));
+    }
+}

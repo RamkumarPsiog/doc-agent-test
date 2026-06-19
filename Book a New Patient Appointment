@@ -1,0 +1,224 @@
+// File: src/main/java/com/hospital/management/scheduling/model/Appointment.java
+package com.hospital.management.scheduling.model;
+
+import jakarta.persistence.*;
+import java.time.LocalDate;
+import java.time.LocalTime;
+
+@Entity
+@Table(name = "appointments", uniqueConstraints = {
+    @UniqueConstraint(columnNames = {"doctor_id", "appointment_date", "time_slot"})
+})
+public class Appointment {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(name = "patient_id", nullable = false)
+    private Long patientId;
+
+    @ManyToOne(optional = false)
+    @JoinColumn(name = "doctor_id", nullable = false)
+    private Doctor doctor;
+
+    @Column(name = "appointment_date", nullable = false)
+    private LocalDate appointmentDate;
+
+    @Column(name = "time_slot", nullable = false)
+    private LocalTime timeSlot;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    private AppointmentStatus status;
+
+    @Version
+    private Long version; // Optimistic locking mechanism to prevent double booking
+
+    // Getters, Setters, Constructors
+    public Appointment() {}
+    public Appointment(Long patientId, Doctor doctor, LocalDate appointmentDate, LocalTime timeSlot, AppointmentStatus status) {
+        this.patientId = patientId;
+        this.doctor = doctor;
+        this.appointmentDate = appointmentDate;
+        this.timeSlot = timeSlot;
+        this.status = status;
+    }
+
+    public Long getId() { return id; }
+    public Long getPatientId() { return patientId; }
+    public Doctor getDoctor() { return doctor; }
+    public LocalDate getAppointmentDate() { return appointmentDate; }
+    public LocalTime getTimeSlot() { return timeSlot; }
+    public AppointmentStatus getStatus() { return status; }
+    public void setStatus(AppointmentStatus status) { this.status = status; }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/repository/AppointmentRepository.java
+package com.hospital.management.scheduling.repository;
+
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+
+@Repository
+public interface AppointmentRepository extends JpaRepository<Appointment, Long> {
+    List<Appointment> findByDoctorIdAndAppointmentDateAndStatus(Long doctorId, LocalDate date, AppointmentStatus status);
+    boolean existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(Long doctorId, LocalDate date, LocalTime timeSlot, AppointmentStatus status);
+}
+
+// File: src/main/java/com/hospital/management/scheduling/dto/BookingRequest.java
+package com.hospital.management.scheduling.dto;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+
+public record BookingRequest(
+    Long patientId,
+    Long doctorId,
+    LocalDate appointmentDate,
+    LocalTime timeSlot
+) {}
+
+// File: src/main/java/com/hospital/management/scheduling/service/AppointmentService.java
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import com.hospital.management.scheduling.model.Doctor;
+import com.hospital.management.scheduling.repository.AppointmentRepository;
+import com.hospital.management.scheduling.repository.DoctorRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class AppointmentService {
+
+    private final AppointmentRepository appointmentRepository;
+    private final DoctorRepository doctorRepository;
+
+    public AppointmentService(AppointmentRepository appointmentRepository, DoctorRepository doctorRepository) {
+        this.appointmentRepository = appointmentRepository;
+        this.doctorRepository = doctorRepository;
+    }
+
+    @Transactional
+    public Appointment bookAppointment(BookingRequest request) {
+        Doctor doctor = doctorRepository.findById(request.doctorId())
+                .orElseThrow(() -> new IllegalArgumentException("Doctor not found"));
+
+        // Check if conflict exists
+        boolean isSlotTaken = appointmentRepository.existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(
+                request.doctorId(), request.appointmentDate(), request.timeSlot(), AppointmentStatus.CONFIRMED);
+
+        if (isSlotTaken) {
+            throw new IllegalStateException("The requested time slot is already booked.");
+        }
+
+        Appointment appointment = new Appointment(
+                request.patientId(),
+                doctor,
+                request.appointmentDate(),
+                request.timeSlot(),
+                AppointmentStatus.CONFIRMED
+        );
+
+        return appointmentRepository.save(appointment);
+    }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/controller/AppointmentController.java
+package com.hospital.management.scheduling.controller;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.service.AppointmentService;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+@RestController
+@RequestMapping("/api/v1/appointments")
+public class AppointmentController {
+
+    private final AppointmentService appointmentService;
+
+    public AppointmentController(AppointmentService appointmentService) {
+        this.appointmentService = appointmentService;
+    }
+
+    @PostMapping
+    public ResponseEntity<?> bookAppointment(@RequestBody BookingRequest request) {
+        try {
+            Appointment appointment = appointmentService.bookAppointment(request);
+            return ResponseEntity.status(HttpStatus.CREATED).body(appointment);
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(e.getMessage());
+        }
+    }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/service/AvailabilityService.java
+// UPDATE: Filter out slots that have already been confirmed in the database
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.model.Doctor;
+import com.hospital.management.scheduling.model.AvailabilityWindow;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import com.hospital.management.scheduling.repository.DoctorRepository;
+import com.hospital.management.scheduling.repository.AppointmentRepository;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.ArrayList;
+import java.util.List;
+
+@Service
+public class AvailabilityService {
+
+    private final DoctorRepository doctorRepository;
+    private final AppointmentRepository appointmentRepository;
+
+    public AvailabilityService(DoctorRepository doctorRepository, AppointmentRepository appointmentRepository) {
+        this.doctorRepository = doctorRepository;
+        this.appointmentRepository = appointmentRepository;
+    }
+
+    public List<LocalTime> getAvailableSlots(Long doctorId, LocalDate date) {
+        Doctor doctor = doctorRepository.findById(doctorId)
+                .orElseThrow(() -> new IllegalArgumentException("Doctor not found"));
+
+        List<LocalTime> potentialSlots = new ArrayList<>();
+        
+        for (AvailabilityWindow window : doctor.getAvailabilityWindows()) {
+            if (window.getDayOfWeek() == date.getDayOfWeek()) {
+                LocalTime current = window.getStartTime();
+                while (current.isBefore(window.getEndTime())) {
+                    potentialSlots.add(current);
+                    current = current.plusMinutes(30);
+                }
+            }
+        }
+        
+        // Fetch confirmed appointments for the day to filter them out
+        List<Appointment> bookedAppointments = appointmentRepository
+                .findByDoctorIdAndAppointmentDateAndStatus(doctorId, date, AppointmentStatus.CONFIRMED);
+
+        List<LocalTime> takenSlots = bookedAppointments.stream()
+                .map(Appointment::getTimeSlot)
+                .toList();
+
+        potentialSlots.removeAll(takenSlots);
+        return potentialSlots;
+    }
+}
+

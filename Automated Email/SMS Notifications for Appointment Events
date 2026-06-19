@@ -1,0 +1,171 @@
+// File: src/main/java/com/hospital/management/scheduling/event/AppointmentEvent.java
+package com.hospital.management.scheduling.event;
+
+import com.hospital.management.scheduling.model.Appointment;
+
+public record AppointmentEvent(
+    Appointment appointment,
+    String actionType // e.g., "BOOKED", "CANCELLED", "RESCHEDULED"
+) {}
+
+// File: src/main/java/com/hospital/management/scheduling/service/NotificationListener.java
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.event.AppointmentEvent;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Component;
+
+@Component
+public class NotificationListener {
+
+    private static final Logger log = LoggerFactory.getLogger(NotificationListener.class);
+
+    @Async
+    @EventListener
+    public void handleAppointmentEvent(AppointmentEvent event) {
+        String patientId = String.valueOf(event.appointment().getPatientId());
+        String doctorName = event.appointment().getDoctor().getName();
+        String date = event.appointment().getAppointmentDate().toString();
+        String time = event.appointment().getTimeSlot().toString();
+
+        log.info("Processing asynchronous notification for Patient ID: {}", patientId);
+        
+        switch (event.actionType()) {
+            case "BOOKED" -> log.info("NOTIFICATION SENT: Appointment successfully CONFIRMED for doctor {} on {} at {}.", doctorName, date, time);
+            case "CANCELLED" -> log.info("NOTIFICATION SENT: Appointment with doctor {} on {} has been CANCELLED.", doctorName, date);
+            case "RESCHEDULED" -> log.info("NOTIFICATION SENT: Appointment successfully RESCHEDULED with doctor {} to {} at {}.", doctorName, date, time);
+            default -> log.warn("Unknown appointment action type: {}", event.actionType());
+        }
+    }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/service/AppointmentService.java
+// UPDATE: Integrate Spring Context ApplicationEventPublisher to trigger updates
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.dto.RescheduleRequest;
+import com.hospital.management.scheduling.event.AppointmentEvent;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import com.hospital.management.scheduling.model.Doctor;
+import com.hospital.management.scheduling.repository.AppointmentRepository;
+import com.hospital.management.scheduling.repository.DoctorRepository;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class AppointmentService {
+
+    private final AppointmentRepository appointmentRepository;
+    private final DoctorRepository doctorRepository;
+    private final ApplicationEventPublisher eventPublisher;
+
+    public AppointmentService(AppointmentRepository appointmentRepository, DoctorRepository doctorRepository, ApplicationEventPublisher eventPublisher) {
+        this.appointmentRepository = appointmentRepository;
+        this.doctorRepository = doctorRepository;
+        this.eventPublisher = eventPublisher;
+    }
+
+    @Transactional
+    public Appointment bookAppointment(BookingRequest request) {
+        Doctor doctor = doctorRepository.findById(request.doctorId())
+                .orElseThrow(() -> new IllegalArgumentException("Doctor not found"));
+
+        boolean isSlotTaken = appointmentRepository.existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(
+                request.doctorId(), request.appointmentDate(), request.timeSlot(), AppointmentStatus.CONFIRMED);
+
+        if (isSlotTaken) {
+            throw new IllegalStateException("The requested time slot is already booked.");
+        }
+
+        Appointment appointment = new Appointment(
+                request.patientId(),
+                doctor,
+                request.appointmentDate(),
+                request.timeSlot(),
+                AppointmentStatus.CONFIRMED
+        );
+
+        Appointment savedAppointment = appointmentRepository.save(appointment);
+        
+        // Publish event to the notification listener pipeline
+        eventPublisher.publishEvent(new AppointmentEvent(savedAppointment, "BOOKED"));
+        
+        return savedAppointment;
+    }
+
+    @Transactional
+    public Appointment cancelAppointment(Long appointmentId) {
+        Appointment appointment = appointmentRepository.findById(appointmentId)
+                .orElseThrow(() -> new IllegalArgumentException("Appointment record not found"));
+
+        if (appointment.getStatus() == AppointmentStatus.CANCELLED) {
+            throw new IllegalStateException("Appointment is already cancelled.");
+        }
+
+        appointment.setStatus(AppointmentStatus.CANCELLED);
+        Appointment savedAppointment = appointmentRepository.save(appointment);
+        
+        // Publish cancellation event update
+        eventPublisher.publishEvent(new AppointmentEvent(savedAppointment, "CANCELLED"));
+        
+        return savedAppointment;
+    }
+
+    @Transactional
+    public Appointment rescheduleAppointment(Long appointmentId, RescheduleRequest request) {
+        Appointment appointment = appointmentRepository.findById(appointmentId)
+                .orElseThrow(() -> new IllegalArgumentException("Appointment record not found"));
+
+        if (appointment.getStatus() == AppointmentStatus.CANCELLED) {
+            throw new IllegalStateException("Cannot reschedule a cancelled appointment.");
+        }
+
+        boolean isSlotTaken = appointmentRepository.existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(
+                appointment.getDoctor().getId(), request.newAppointmentDate(), request.newTimeSlot(), AppointmentStatus.CONFIRMED);
+
+        if (isSlotTaken) {
+            throw new IllegalStateException("The newly requested time slot is already taken.");
+        }
+
+        try {
+            java.lang.reflect.Field dateField = Appointment.class.getDeclaredField("appointmentDate");
+            dateField.setAccessible(true);
+            dateField.set(appointment, request.newAppointmentDate());
+
+            java.lang.reflect.Field slotField = Appointment.class.getDeclaredField("timeSlot");
+            slotField.setAccessible(true);
+            slotField.set(appointment, request.newTimeSlot());
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to mutate appointment properties internally", e);
+        }
+
+        Appointment savedAppointment = appointmentRepository.save(appointment);
+        
+        // Publish modification event update
+        eventPublisher.publishEvent(new AppointmentEvent(savedAppointment, "RESCHEDULED"));
+        
+        return savedAppointment;
+    }
+
+    @Transactional(readOnly = true)
+    public List<Appointment> getDoctorAgenda(Long doctorId, LocalDate date) {
+        if (!doctorRepository.existsById(doctorId)) {
+            throw new IllegalArgumentException("Doctor not found");
+        }
+        return appointmentRepository.findByDoctorIdAndAppointmentDateOrderByTimeSlotAsc(doctorId, date);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Appointment> getPatientHistory(Long patientId) {
+        return appointmentRepository.findByPatientIdOrderByAppointmentDateDescTimeSlotDesc(patientId);
+    }
+}

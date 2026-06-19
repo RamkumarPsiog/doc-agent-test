@@ -1,0 +1,156 @@
+// File: src/main/java/com/hospital/management/scheduling/model/AppointmentStatus.java
+package com.hospital.management.scheduling.model;
+
+public enum AppointmentStatus {
+    CONFIRMED,
+    CANCELLED,
+    COMPLETED
+}
+
+// File: src/main/java/com/hospital/management/scheduling/model/Doctor.java
+package com.hospital.management.scheduling.model;
+
+import jakarta.persistence.*;
+import java.util.List;
+
+@Entity
+@Table(name = "doctors")
+public class Doctor {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    private String name;
+    private String specialty;
+
+    @ElementCollection
+    @CollectionTable(name = "doctor_availability_windows", joinColumns = @JoinColumn(name = "doctor_id"))
+    private List<AvailabilityWindow> availabilityWindows;
+
+    // Getters, Setters, Constructors
+    public Doctor() {}
+    public Doctor(String name, String specialty, List<AvailabilityWindow> availabilityWindows) {
+        this.name = name;
+        this.specialty = specialty;
+        this.availabilityWindows = availabilityWindows;
+    }
+    public Long getId() { return id; }
+    public String getName() { return name; }
+    public List<AvailabilityWindow> getAvailabilityWindows() { return availabilityWindows; }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/model/AvailabilityWindow.java
+package com.hospital.management.scheduling.model;
+
+import jakarta.persistence.Embeddable;
+import java.time.DayOfWeek;
+import java.time.LocalTime;
+
+@Embeddable
+public class AvailabilityWindow {
+    private DayOfWeek dayOfWeek;
+    private LocalTime startTime;
+    private LocalTime endTime;
+
+    // Getters, Setters, Constructors
+    public AvailabilityWindow() {}
+    public AvailabilityWindow(DayOfWeek dayOfWeek, LocalTime startTime, LocalTime endTime) {
+        this.dayOfWeek = dayOfWeek;
+        this.startTime = startTime;
+        this.endTime = endTime;
+    }
+    public DayOfWeek getDayOfWeek() { return dayOfWeek; }
+    public LocalTime getStartTime() { return startTime; }
+    public LocalTime getEndTime() { return endTime; }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/repository/DoctorRepository.java
+package com.hospital.management.scheduling.repository;
+
+import com.hospital.management.scheduling.model.Doctor;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+@Repository
+public interface DoctorRepository extends JpaRepository<Doctor, Long> {
+}
+
+// File: src/main/java/com/hospital/management/scheduling/service/AvailabilityService.java
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.model.Doctor;
+import com.hospital.management.scheduling.model.AvailabilityWindow;
+import com.hospital.management.scheduling.repository.DoctorRepository;
+import org.springframework.stereotype.Service;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.ArrayList;
+import java.util.List;
+
+@Service
+public class AvailabilityService {
+
+    private final DoctorRepository doctorRepository;
+
+    public AvailabilityService(DoctorRepository doctorRepository) {
+        this.doctorRepository = doctorRepository;
+    }
+
+    public List<LocalTime> getAvailableSlots(Long doctorId, LocalDate date) {
+        Doctor doctor = doctorRepository.findById(doctorId)
+                .orElseThrow(() -> new IllegalArgumentException("Doctor not found"));
+
+        List<LocalTime> slots = new ArrayList<>();
+        
+        // Find if the doctor has a shift on this specific day of the week
+        for (AvailabilityWindow window : doctor.getAvailabilityWindows()) {
+            if (window.getDayOfWeek() == date.getDayOfWeek()) {
+                LocalTime current = window.getStartTime();
+                while (current.isBefore(window.getEndTime())) {
+                    slots.add(current);
+                    current = current.plusMinutes(30); // 30-minute default slots
+                }
+            }
+        }
+        
+        // Note: Slot filtering against booked appointments will be wired up in the next story's commit
+        return slots;
+    }
+}
+
+
+// File: src/main/java/com/hospital/management/scheduling/controller/AvailabilityController.java
+package com.hospital.management.scheduling.controller;
+
+import com.hospital.management.scheduling.service.AvailabilityService;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/v1/doctors")
+public class AvailabilityController {
+
+    private final AvailabilityService availabilityService;
+
+    public AvailabilityController(AvailabilityService availabilityService) {
+        this.availabilityService = availabilityService;
+    }
+
+    @GetMapping("/{id}/availability")
+    public ResponseEntity<List<LocalTime>> getAvailability(
+            @PathVariable Long id,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        
+        if (date.isBefore(LocalDate.now())) {
+            return ResponseEntity.badRequest().build();
+        }
+        
+        return ResponseEntity.ok(availabilityService.getAvailableSlots(id, date));
+    }
+}
