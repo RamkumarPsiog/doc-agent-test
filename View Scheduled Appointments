@@ -1,0 +1,141 @@
+// File: src/main/java/com/hospital/management/scheduling/repository/AppointmentRepository.java
+// UPDATE: Add dynamic query capabilities for the staff agenda view
+package com.hospital.management.scheduling.repository;
+
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.stereotype.Repository;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.List;
+
+@Repository
+public interface AppointmentRepository extends JpaRepository<Appointment, Long> {
+    List<Appointment> findByDoctorIdAndAppointmentDateAndStatus(Long doctorId, LocalDate date, AppointmentStatus status);
+    boolean existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(Long doctorId, LocalDate date, LocalTime timeSlot, AppointmentStatus status);
+    
+    // New query methods for operational agenda feeds
+    List<Appointment> findByDoctorIdAndAppointmentDateOrderByTimeSlotAsc(Long doctorId, LocalDate date);
+    List<Appointment> findByPatientIdOrderByAppointmentDateDescTimeSlotDesc(Long patientId);
+}
+
+
+// File: src/main/java/com/hospital/management/scheduling/service/AppointmentService.java
+// UPDATE: Add lookup execution logic for dashboard views
+package com.hospital.management.scheduling.service;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.model.AppointmentStatus;
+import com.hospital.management.scheduling.model.Doctor;
+import com.hospital.management.scheduling.repository.AppointmentRepository;
+import com.hospital.management.scheduling.repository.DoctorRepository;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@Service
+public class AppointmentService {
+
+    private final AppointmentRepository appointmentRepository;
+    private final DoctorRepository doctorRepository;
+
+    public AppointmentService(AppointmentRepository appointmentRepository, DoctorRepository doctorRepository) {
+        this.appointmentRepository = appointmentRepository;
+        this.doctorRepository = doctorRepository;
+    }
+
+    @Transactional
+    public Appointment bookAppointment(BookingRequest request) {
+        Doctor doctor = doctorRepository.findById(request.doctorId())
+                .orElseThrow(() -> new IllegalArgumentException("Doctor not found"));
+
+        boolean isSlotTaken = appointmentRepository.existsByDoctorIdAndAppointmentDateAndTimeSlotAndStatus(
+                request.doctorId(), request.appointmentDate(), request.timeSlot(), AppointmentStatus.CONFIRMED);
+
+        if (isSlotTaken) {
+            throw new IllegalStateException("The requested time slot is already booked.");
+        }
+
+        Appointment appointment = new Appointment(
+                request.patientId(),
+                doctor,
+                request.appointmentDate(),
+                request.timeSlot(),
+                AppointmentStatus.CONFIRMED
+        );
+
+        return appointmentRepository.save(appointment);
+    }
+
+    // New business logic methods for agenda lookups
+    @Transactional(readOnly = true)
+    public List<Appointment> getDoctorAgenda(Long doctorId, LocalDate date) {
+        if (!doctorRepository.existsById(doctorId)) {
+            throw new IllegalArgumentException("Doctor not found");
+        }
+        return appointmentRepository.findByDoctorIdAndAppointmentDateOrderByTimeSlotAsc(doctorId, date);
+    }
+
+    @Transactional(readOnly = true)
+    public List<Appointment> getPatientHistory(Long patientId) {
+        return appointmentRepository.findByPatientIdOrderByAppointmentDateDescTimeSlotDesc(patientId);
+    }
+}
+
+// File: src/main/java/com/hospital/management/scheduling/controller/AppointmentController.java
+// UPDATE: Add endpoint bindings for agenda and tracking dashboards
+package com.hospital.management.scheduling.controller;
+
+import com.hospital.management.scheduling.dto.BookingRequest;
+import com.hospital.management.scheduling.model.Appointment;
+import com.hospital.management.scheduling.service.AppointmentService;
+import org.springframework.format.annotation.DateTimeFormat;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.time.LocalDate;
+import java.util.List;
+
+@RestController
+@RequestMapping("/api/v1/appointments")
+public class AppointmentController {
+
+    private final AppointmentService appointmentService;
+
+    public AppointmentController(AppointmentService appointmentService) {
+        this.appointmentService = appointmentService;
+    }
+
+    @PostMapping
+    public ResponseEntity<?> bookAppointment(@RequestBody BookingRequest request) {
+        try {
+            Appointment appointment = appointmentService.bookAppointment(request);
+            return ResponseEntity.status(HttpStatus.CREATED).body(appointment);
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.CONFLICT).body(e.getMessage());
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).body(e.getMessage());
+        }
+    }
+
+    // New endpoint for tracking a specific doctor's calendar schedule
+    @GetMapping("/doctor/{doctorId}")
+    public ResponseEntity<List<Appointment>> getDoctorAgenda(
+            @PathVariable Long doctorId,
+            @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date) {
+        return ResponseEntity.ok(appointmentService.getDoctorAgenda(doctorId, date));
+    }
+
+    // New endpoint for pulling up past and upcoming patient data tracking
+    @GetMapping("/patient/{patientId}")
+    public ResponseEntity<List<Appointment>> getPatientHistory(@PathVariable Long patientId) {
+        return ResponseEntity.ok(appointmentService.getPatientHistory(patientId));
+    }
+}
+
